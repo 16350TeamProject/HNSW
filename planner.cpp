@@ -50,8 +50,6 @@
 #define	MIN(A, B)	((A) < (B) ? (A) : (B))
 #endif
 
-#define PI 3.141592654
-
 //the length of each link in the arm
 #define LINKLENGTH_CELLS 10
 
@@ -67,6 +65,12 @@ using std::cout;
 using std::endl;
 using std::swap;
 
+#include "hnswlib/hnswlib/hnswlib.h"
+#include "nanoflann/include/nanoflann.hpp"
+using namespace std;
+using namespace nanoflann;
+
+double PI=3.141592654;
 /// @brief 
 /// @param filepath 
 /// @return map, x_size, y_size
@@ -467,9 +471,6 @@ static void PRMPlanner(
 	}
 }
 
-
-
-#include "hnswlib/hnswlib/hnswlib.h"
 
 struct Node {
 	std::vector<double> angles;
@@ -880,10 +881,6 @@ static void RRTHNSWPlanner(
     printf("RRT-HNSW successfully found a path with %d waypoints.\n", *planlength);
 }
 
-
-#include "nanoflann.hpp"
-using namespace nanoflann;
-
 struct NodeCloud {
     vector<Node*> nodes;
 
@@ -955,7 +952,7 @@ static void PRMKDTreePlanner(
 
         KNNResultSet<double> resultSet(K_NEAREST + 1);
         resultSet.init(&ret_indices[0], &out_distances_sqr[0]);
-        index.findNeighbors(resultSet, node->angles.data(), SearchParams(10));
+        index.findNeighbors(resultSet, node->angles.data(), nanoflann::SearchParameters(10));
 
         for (size_t i = 1; i < resultSet.size(); i++) { // Skip first as it's self
             Node* neighbor = cloud.nodes[ret_indices[i]];
@@ -1067,7 +1064,7 @@ static void RRTKDTreePlanner(
         double dist_sq;
         KNNResultSet<double> resultSet(1);
         resultSet.init(&nearest_idx, &dist_sq);
-        index.findNeighbors(resultSet, sample.data(), SearchParams(10));
+        index.findNeighbors(resultSet, sample.data(), nanoflann::SearchParameters(10));
         Node* nearest = cloud.nodes[nearest_idx];
 
         vector<double> direction(numofDOFs);
@@ -1077,13 +1074,18 @@ static void RRTKDTreePlanner(
 
         if (!isValid(direction)) continue;
 
-        Node* new_node = new Node{direction, nearest};
+		Node* new_node = new Node{direction};
+		new_node->parent = nearest;
+
         tree.push_back(new_node);
         cloud.nodes.push_back(new_node);
-        index.addPoints(cloud.kdtree_get_point_count() - 1, cloud.kdtree_get_point_count() - 1);
-
+		
+		if (cloud.nodes.size() % 500 == 0) {
+			index.buildIndex();
+		}
         if (computeDistance(new_node->angles, goal_config) < GOAL_THRESHOLD) {
-            final_node = new Node{goal_config, new_node};
+			final_node = new Node{goal_config};
+			final_node->parent = new_node;
             tree.push_back(final_node);
             break;
         }
