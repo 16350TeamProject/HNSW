@@ -1,0 +1,6 @@
+[submodule "hnswlib"]
+	path = hnswlib
+	url = https://github.com/nmslib/hnswlib.git
+[submodule "nanoflann"]
+	path = nanoflann
+	url = https://github.com/jlblancoc/nanoflann.git

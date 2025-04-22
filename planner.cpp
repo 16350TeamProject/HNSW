@@ -30,9 +30,11 @@
 
 /* Planner Ids */
 #define PRM         0
-#define PRM_HNSW    1
-#define RRT         2
+#define RRT         1
+#define PRM_HNSW    2
 #define RRT_HNSW    3
+#define PRM_KDTree  4
+#define RRT_KDTree  5
 
 /* Output Arguments */
 #define	PLAN_OUT	plhs[0]
@@ -879,8 +881,235 @@ static void RRTHNSWPlanner(
 }
 
 
+#include "nanoflann.hpp"
+using namespace nanoflann;
 
+struct NodeCloud {
+    vector<Node*> nodes;
 
+    // Required for nanoflann
+    inline size_t kdtree_get_point_count() const { return nodes.size(); }
+    inline double kdtree_get_pt(const size_t idx, const size_t dim) const {
+        return nodes[idx]->angles[dim];
+    }
+    template <class BBOX>
+    bool kdtree_get_bbox(BBOX&) const { return false; }
+};
+
+typedef KDTreeSingleIndexAdaptor<
+    L2_Simple_Adaptor<double, NodeCloud>,
+    NodeCloud,
+    -1, // Dynamic dimensions
+    size_t
+> KDTree;
+
+// PRM-KDTree Planner
+static void PRMKDTreePlanner(
+    double* map, int x_size, int y_size,
+    double* armstart_anglesV_rad, double* armgoal_anglesV_rad, int numofDOFs,
+    double*** plan, int* planlength)
+{
+    const int NUM_SAMPLES = 10000;
+    const int K_NEAREST = 13;
+
+    vector<Node*> roadmap;
+    NodeCloud cloud;
+
+    auto isValid = [&](const vector<double>& config) {
+        return IsValidArmConfiguration(const_cast<double*>(config.data()), numofDOFs, map, x_size, y_size);
+    };
+
+    // Generate valid samples
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        vector<double> sample(numofDOFs);
+        for (int j = 0; j < numofDOFs; j++)
+            sample[j] = ((double)rand() / RAND_MAX) * 2 * PI;
+
+        if (isValid(sample)) {
+            Node* new_node = new Node{sample};
+            roadmap.push_back(new_node);
+            cloud.nodes.push_back(new_node);
+        }
+    }
+
+    Node* start_node = new Node{{armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs}};
+    Node* goal_node = new Node{{armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs}};
+    roadmap.push_back(start_node);
+    roadmap.push_back(goal_node);
+    cloud.nodes.push_back(start_node);
+    cloud.nodes.push_back(goal_node);
+
+    if (!isValid(start_node->angles) || !isValid(goal_node->angles)) {
+        printf("Start or Goal is in collision!\n");
+        return;
+    }
+
+    // Build KDTree
+    KDTree index(numofDOFs, cloud, KDTreeSingleIndexAdaptorParams(10));
+    index.buildIndex();
+
+    // Connect neighbors using KDTree
+    for (Node* node : roadmap) {
+        vector<size_t> ret_indices(K_NEAREST + 1);
+        vector<double> out_distances_sqr(K_NEAREST + 1);
+
+        KNNResultSet<double> resultSet(K_NEAREST + 1);
+        resultSet.init(&ret_indices[0], &out_distances_sqr[0]);
+        index.findNeighbors(resultSet, node->angles.data(), SearchParams(10));
+
+        for (size_t i = 1; i < resultSet.size(); i++) { // Skip first as it's self
+            Node* neighbor = cloud.nodes[ret_indices[i]];
+            if (isValid(neighbor->angles))
+                node->neighbors.push_back(neighbor);
+        }
+    }
+
+    // Use existing Dijkstra algorithm for searching
+    auto compare = [](const pair<double, Node*>& a, const pair<double, Node*>& b) {
+        return a.first > b.first;
+    };
+
+    priority_queue<pair<double, Node*>, vector<pair<double, Node*>>, decltype(compare)> pq(compare);
+    unordered_set<Node*> visited;
+
+    start_node->cost = 0.0;
+    pq.emplace(0.0, start_node);
+
+    bool found = false;
+    while (!pq.empty()) {
+        Node* current = pq.top().second;
+        pq.pop();
+
+        if (visited.count(current)) continue;
+        visited.insert(current);
+
+        if (current == goal_node) {
+            found = true;
+            break;
+        }
+
+        for (Node* neighbor : current->neighbors) {
+            double new_cost = current->cost + computeDistance(current->angles, neighbor->angles);
+            if (!visited.count(neighbor) && (neighbor->parent == nullptr || new_cost < neighbor->cost)) {
+                neighbor->cost = new_cost;
+                neighbor->parent = current;
+                pq.emplace(new_cost, neighbor);
+            }
+        }
+    }
+
+    if (!found) {
+        printf("No valid path found!\n");
+        return;
+    }
+
+    vector<vector<double>> path;
+    for (Node* node = goal_node; node != nullptr; node = node->parent)
+        path.push_back(node->angles);
+
+    reverse(path.begin(), path.end());
+    *planlength = path.size();
+    *plan = (double**)malloc(*planlength * sizeof(double*));
+
+    for (int i = 0; i < *planlength; i++) {
+        (*plan)[i] = (double*)malloc(numofDOFs * sizeof(double));
+        memcpy((*plan)[i], path[i].data(), numofDOFs * sizeof(double));
+    }
+
+    printf("PRM-KDTree successfully found a path with %d waypoints.\n", *planlength);
+    for (Node* node : roadmap) delete node;
+}
+
+// RRT-KDTree Planner
+static void RRTKDTreePlanner(
+    double* map, int x_size, int y_size,
+    double* armstart_anglesV_rad, double* armgoal_anglesV_rad, int numofDOFs,
+    double*** plan, int* planlength)
+{
+    const int MAX_ITER = 10000;
+    const double STEP_SIZE = 0.05;
+    const double GOAL_BIAS = 0.1;
+    const double GOAL_THRESHOLD = 0.02;
+
+    vector<Node*> tree;
+    NodeCloud cloud;
+
+    auto isValid = [&](const vector<double>& config) {
+        return IsValidArmConfiguration(const_cast<double*>(config.data()), numofDOFs, map, x_size, y_size);
+    };
+
+    Node* start_node = new Node{{armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs}};
+    vector<double> goal_config(armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs);
+
+    if (!isValid(start_node->angles) || !isValid(goal_config)) {
+        printf("Start or Goal is in collision!\n");
+        return;
+    }
+
+    tree.push_back(start_node);
+    cloud.nodes.push_back(start_node);
+
+    KDTree index(numofDOFs, cloud, KDTreeSingleIndexAdaptorParams(10));
+    index.buildIndex();
+
+    Node* final_node = nullptr;
+
+    for (int iter = 0; iter < MAX_ITER; iter++) {
+        vector<double> sample(numofDOFs);
+        if ((double)rand() / RAND_MAX < GOAL_BIAS) {
+            sample = goal_config;
+        } else {
+            for (int j = 0; j < numofDOFs; j++)
+                sample[j] = ((double)rand() / RAND_MAX) * 2 * PI;
+        }
+
+        size_t nearest_idx;
+        double dist_sq;
+        KNNResultSet<double> resultSet(1);
+        resultSet.init(&nearest_idx, &dist_sq);
+        index.findNeighbors(resultSet, sample.data(), SearchParams(10));
+        Node* nearest = cloud.nodes[nearest_idx];
+
+        vector<double> direction(numofDOFs);
+        double dist = sqrt(dist_sq);
+        for (int j = 0; j < numofDOFs; j++)
+            direction[j] = nearest->angles[j] + STEP_SIZE * (sample[j] - nearest->angles[j]) / dist;
+
+        if (!isValid(direction)) continue;
+
+        Node* new_node = new Node{direction, nearest};
+        tree.push_back(new_node);
+        cloud.nodes.push_back(new_node);
+        index.addPoints(cloud.kdtree_get_point_count() - 1, cloud.kdtree_get_point_count() - 1);
+
+        if (computeDistance(new_node->angles, goal_config) < GOAL_THRESHOLD) {
+            final_node = new Node{goal_config, new_node};
+            tree.push_back(final_node);
+            break;
+        }
+    }
+
+    if (!final_node) {
+        printf("RRT-KDTree failed to find a path.\n");
+        return;
+    }
+
+    vector<vector<double>> path;
+    for (Node* node = final_node; node != nullptr; node = node->parent)
+        path.push_back(node->angles);
+
+    reverse(path.begin(), path.end());
+    *planlength = path.size();
+    *plan = (double**)malloc(*planlength * sizeof(double*));
+
+    for (int i = 0; i < *planlength; i++) {
+        (*plan)[i] = (double*)malloc(numofDOFs * sizeof(double));
+        memcpy((*plan)[i], path[i].data(), numofDOFs * sizeof(double));
+    }
+
+    printf("RRT-KDTree successfully found a path with %d waypoints.\n", *planlength);
+    for (Node* node : tree) delete node;
+}
 
 /** Your final solution will be graded by an grading script which will
  * send the default 6 arguments:
@@ -915,15 +1144,19 @@ int main(int argc, char** argv) {
 	double** plan = NULL;
 	int planlength = 0;
     
-	if (whichPlanner == 0) {
+	if (whichPlanner == PRM) {
 		PRMPlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
-	} else if (whichPlanner == 1) {
-		PRMHNSWPlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
-	} else if (whichPlanner == 2) {
+	} else if (whichPlanner == RRT) {
 		RRTPlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
-	}; //else if (whichPlanner == 3) {
-		//RRTHNSWPlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
-	//} 
+	} else if (whichPlanner == PRM_HNSW) {
+		PRMHNSWPlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
+	} else if (whichPlanner == RRT_HNSW) {
+		RRTHNSWPlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
+	} else if (whichPlanner == PRM_KDTree) {
+		PRMKDTreePlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
+	} else if (whichPlanner == RRT_KDTree) {
+		RRTKDTreePlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
+	}
 
 	//// Feel free to modify anything above.
 	//// If you modify something below, please change it back afterwards as the 
