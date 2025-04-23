@@ -8,7 +8,6 @@
 #include <vector>
 #include <array>
 #include <algorithm>
-#include <utility> 
 #include <queue>
 
 #include <tuple>
@@ -18,9 +17,6 @@
 #include <iostream> // cout, endl
 #include <fstream> // For reading/writing files
 #include <assert.h> 
-#include <unordered_set>
-#include <cfloat>
-#include <ctime>
 
 /* Input Arguments */
 #define	MAP_IN      prhs[0]
@@ -30,11 +26,9 @@
 
 /* Planner Ids */
 #define PRM         0
-#define RRT         1
-#define PRM_HNSW    2
-#define RRT_HNSW    3
-#define PRM_KDTree  4
-#define RRT_KDTree  5
+#define PRM_HNSW    1
+#define RRT         2
+
 
 /* Output Arguments */
 #define	PLAN_OUT	plhs[0]
@@ -50,6 +44,8 @@
 #define	MIN(A, B)	((A) < (B) ? (A) : (B))
 #endif
 
+#define PI 3.141592654
+
 //the length of each link in the arm
 #define LINKLENGTH_CELLS 10
 
@@ -63,17 +59,17 @@ using std::make_tuple;
 using std::tie;
 using std::cout;
 using std::endl;
-using std::swap;
 
-#include "hnswlib/hnswlib/hnswlib.h"
-#include "nanoflann/include/nanoflann.hpp"
-using namespace std;
-using namespace nanoflann;
+#ifdef DEBUG
+  #define DEBUG_PRINT(x) std::cout << x
+#else
+  #define DEBUG_PRINT(x)
+#endif
 
-double PI=3.141592654;
-/// @brief 
-/// @param filepath 
-/// @return map, x_size, y_size
+/** @brief 
+ * @param filepath 
+ * @return map, x_size, y_size
+ */
 tuple<double*, int, int> loadMap(string filepath) {
 	std::FILE *f = fopen(filepath.c_str(), "r");
 	if (f) {
@@ -111,15 +107,14 @@ tuple<double*, int, int> loadMap(string filepath) {
 }
 
 // Splits string based on deliminator
-vector<string> split(const string& str, const string& delim) {   
+std::vector<string> split(const string& str, const string& delim) {   
 		// https://stackoverflow.com/questions/14265581/parse-split-a-string-in-c-using-string-delimiter-standard-c/64886763#64886763
 		const std::regex ws_re(delim);
 		return { std::sregex_token_iterator(str.begin(), str.end(), ws_re, -1), std::sregex_token_iterator() };
 }
 
-
 double* doubleArrayFromString(string str) {
-	vector<string> vals = split(str, ",");
+	std::vector<string> vals = split(str, ",");
 	double* ans = new double[vals.size()];
 	for (int i = 0; i < vals.size(); ++i) {
 		ans[i] = std::stod(vals[i]);
@@ -130,7 +125,6 @@ double* doubleArrayFromString(string str) {
 bool equalDoubleArrays(double* v1, double *v2, int size) {
     for (int i = 0; i < size; ++i) {
         if (abs(v1[i]-v2[i]) > 1e-3) {
-            cout << endl;
             return false;
         }
     }
@@ -149,7 +143,6 @@ typedef struct {
 	int Flipped;
 } bresenham_param_t;
 
-
 void ContXY2Cell(double x, double y, short unsigned int* pX, short unsigned int *pY, int x_size, int y_size) {
 	double cellsize = 1.0;
 	//take the nearest cell
@@ -161,7 +154,6 @@ void ContXY2Cell(double x, double y, short unsigned int* pX, short unsigned int 
 	if( y < 0) *pY = 0;
 	if( *pY >= y_size) *pY = y_size-1;
 }
-
 
 void get_bresenham_parameters(int p1x, int p1y, int p2x, int p2y, bresenham_param_t *params) {
 	params->UsingYIndex = 0;
@@ -238,8 +230,6 @@ int get_next_point(bresenham_param_t *params) {
 	return 1;
 }
 
-
-
 int IsValidLineSegment(double x0, double y0, double x1, double y1, double*	map,
 			 int x_size, int y_size) {
 	bresenham_param_t params;
@@ -293,351 +283,267 @@ int IsValidArmConfiguration(double* angles, int numofDOFs, double*	map,
 	return 1;
 }
 
-// Compute the Euclidean distance between two configurations
-double computeDistance(const vector<double>& a, const vector<double>& b) {
-    double sum = 0.0;
-    for (size_t i = 0; i < a.size(); i++) {
-        sum += pow(a[i] - b[i], 2);
-    }
-    return sqrt(sum);
-}
-
-// PRM Planner
-static void PRMPlanner(
-	double* map,
-	int x_size,
-	int y_size,
-	double* armstart_anglesV_rad,
-	double* armgoal_anglesV_rad,
-	int numofDOFs,
-	double*** plan,
-	int* planlength)
+static void planner(
+			double* map,
+			int x_size,
+			int y_size,
+			double* armstart_anglesV_rad,
+			double* armgoal_anglesV_rad,
+            int numofDOFs,
+            double*** plan,
+            int* planlength) 
 {
-	const int NUM_SAMPLES = 10000;   // sample size of random configurations
-	const int K_NEAREST = 13;      // number of nearest neighbors to attempt to connect
-
-    struct Node {
-        vector<double> angles;
-        vector<Node*> neighbors;
-        Node* parent = nullptr;
-        double cost = 0.0;
-    };
-
-	vector<Node*> roadmap;
-
-	// check if a configuration is valid
-	auto isValid = [&](const vector<double>& config) {
-		return IsValidArmConfiguration(const_cast<double*>(config.data()), numofDOFs, map, x_size, y_size);
-	};
-
-	// generate random valid samples, so we search for a path in the selected space
-	for (int i = 0; i < NUM_SAMPLES; i++) {
-		vector<double> sample(numofDOFs);
-		for (int j = 0; j < numofDOFs; j++) {
-			sample[j] = ((double)rand() / RAND_MAX) * 2 * PI;  // random angle [0, 2π]
-		}
-
-		if (isValid(sample)) {
-			Node* new_node = new Node{sample};
-			roadmap.push_back(new_node);
-		}
-	}
-
-	// add start and goal configurations to the roadmap
-	Node* start_node = new Node{{armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs}};
-	Node* goal_node = new Node{{armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs}};
-
-	if (!isValid(start_node->angles) || !isValid(goal_node->angles)) {
-		printf("Start or Goal is in collision!\n");
-		return;
-	}
-	roadmap.push_back(start_node);
-	roadmap.push_back(goal_node);
-
-	// trying to connect to nearest neighbors
-	for (auto& node : roadmap) {
-		std::vector<std::pair<double, Node*>> neighbors;
+	//no plan by default
+	*plan = NULL;
+	*planlength = 0;
 		
-		for (auto& other : roadmap) {
-			if (node == other) continue;
-			double dist = computeDistance(node->angles, other->angles);
-			neighbors.emplace_back(dist, other);
-		}
+    //for now just do straight interpolation between start and goal checking for the validity of samples
 
-		// sort by distance and connect up to K_NEAREST valid paths
-		sort(neighbors.begin(), neighbors.end());
-		for (int i = 0; i < std::min(K_NEAREST, (int)neighbors.size()); i++) {
-			if (isValid(neighbors[i].second->angles)) {
-				node->neighbors.push_back(neighbors[i].second);
-			}
-		}
-	}
-
-	auto compare = [](const std::pair<double, Node*>& a, const std::pair<double, Node*>& b) {
-		return a.first > b.first;
-	};	
-
-    std::priority_queue<
-        std::pair<double, Node*>,
-        vector<std::pair<double, Node*>>,
-        decltype(compare)
-    > pq(compare);
-
-	std::unordered_set<Node*> visited;
-
-	start_node->cost = 0.0;
-	pq.emplace(0.0, start_node);
-
-	bool found = false;
-
-	// Dijkstra graph search to find the shortest path
-	while (!pq.empty()) {
-		Node* current = pq.top().second;
-		pq.pop();
-
-		// skip visited nodes
-		if (visited.find(current) != visited.end())
-        continue; 
-
-		visited.insert(current);
-
-		// find the goal node
-		if (current == goal_node) {
-			found = true;
-			break;
-		}
-
-		for (Node* neighbor : current->neighbors) {
-			double new_cost = current->cost + computeDistance(current->angles, neighbor->angles);
-			if (visited.find(neighbor) == visited.end() && 
-				(neighbor->parent == nullptr || new_cost < neighbor->cost)) {
-				
-				neighbor->cost = new_cost;
-				neighbor->parent = current;
-				pq.emplace(new_cost, neighbor);
-			}
-		}
-	}
-
-	if (!found) {
-		printf("No valid path found!\n");
-		return;
-	}
-
-	vector<vector<double>> path;
-
-	// ensure the goal node is valid
-	if (goal_node == nullptr) {
-		printf("ERROR DETECTED: Goal node is NULL. No valid path found!\n");
-		return;
-	}
-	if (goal_node->parent == nullptr) {
-		printf("ERROR DETECTED: Goal node is not connected to the graph. No valid path found!\n");
-		return;
-	}
-	
-	// backtrack to extract the path
-	int MAX_ITER = 10000;
-	int iteration = 0;
-	for (Node* node = goal_node; node != nullptr; node = node->parent) {
-		if (iteration++ > MAX_ITER) {
-			printf("ERROR DETECTED: Infinite loop detected while backtracking!\n");
-			return;
-		}
-		path.push_back(node->angles);
-		// printf("  Step %d: Node at %p\n", iteration, node);
-	}
-	
-	reverse(path.begin(), path.end());
-	// printf("DEBUG: Extracted path length = %d\n", (int)path.size());
-	
-
-	// store the path
-	*planlength = path.size();
-
-	//printf("DEBUG: Extracted path length = %d\n", *planlength);
-
-	*plan = (double**) malloc(*planlength * sizeof(double*));
-
-	for (int i = 0; i < *planlength; i++) {
-		(*plan)[i] = (double*) malloc(numofDOFs * sizeof(double));
-		memcpy((*plan)[i], path[i].data(), numofDOFs * sizeof(double));
-	}
-
-	printf("PRM successfully found a path with %d waypoints.\n", *planlength);
-
-	for (Node* node : roadmap) {
-		delete node;
-	}
+    double distance = 0;
+    int i,j;
+    for (j = 0; j < numofDOFs; j++){
+        if(distance < fabs(armstart_anglesV_rad[j] - armgoal_anglesV_rad[j]))
+            distance = fabs(armstart_anglesV_rad[j] - armgoal_anglesV_rad[j]);
+    }
+    int numofsamples = (int)(distance/(PI/20));
+    if(numofsamples < 2){
+        printf("The arm is already at the goal\n");
+        return;
+    }
+	int countNumInvalid = 0;
+    *plan = (double**) malloc(numofsamples*sizeof(double*));
+    for (i = 0; i < numofsamples; i++){
+        (*plan)[i] = (double*) malloc(numofDOFs*sizeof(double)); 
+        for(j = 0; j < numofDOFs; j++){
+            (*plan)[i][j] = armstart_anglesV_rad[j] + ((double)(i)/(numofsamples-1))*(armgoal_anglesV_rad[j] - armstart_anglesV_rad[j]);
+        }
+        if(!IsValidArmConfiguration((*plan)[i], numofDOFs, map, x_size, y_size)) {
+			++countNumInvalid;
+        }
+    }
+	printf("Linear interpolation collided at %d instances across the path\n", countNumInvalid);
+    *planlength = numofsamples;
+    
+    return;
 }
 
+double distance(std::vector<double>& q1, std::vector<double>& q2) {
+    double dist = 0.0;
+    for (size_t i = 0; i < q1.size(); i++) {
+        double diff = q1[i] - q2[i];
+        dist += diff * diff;
+    }
+    return sqrt(dist);
+}
 
-struct Node {
-	std::vector<double> angles;
-	std::vector<Node*> neighbors;
-	Node* parent = nullptr;
-	double cost = 0.0;
+struct TreeNode {
+    std::vector<double> angles;
+    TreeNode* parent;
+    double cost;
+
+    TreeNode(const std::vector<double>& a, TreeNode* p = nullptr, double c = 0.0) 
+        : angles(a), parent(p), cost(c) {}
 };
 
-static void debugSummary(const std::vector<Node*>& roadmap, Node* start_node, Node* goal_node) {
-	printf("[DEBUG] Total nodes in roadmap: %lu\n", roadmap.size());
-	printf("[DEBUG] Start node neighbors: %lu\n", start_node->neighbors.size());
-	printf("[DEBUG] Goal node neighbors: %lu\n", goal_node->neighbors.size());
-	double dist = computeDistance(start_node->angles, goal_node->angles);
-	printf("[DEBUG] Start-to-Goal Euclidean distance: %.6f\n", dist);
-
-	int total_edges = 0;
-	for (auto node : roadmap) total_edges += node->neighbors.size();
-	printf("[DEBUG] Total roadmap edges: %d (avg %.2f per node)\n", total_edges, total_edges / (double)roadmap.size());
+std::vector<double> randomConfig(int numofDOFs, double* map, int x_size, int y_size) {
+    std::vector<double> q(numofDOFs);
+    // Continue sampling until a valid configuration is found.
+    while (!IsValidArmConfiguration(q.data(), numofDOFs, map, x_size, y_size)) {
+        for (int i = 0; i < numofDOFs; i++) {
+            q[i] = ((double)rand() / RAND_MAX) * 2 * PI;
+        }
+    }
+    return q;
 }
 
-static void PRMHNSWPlanner(
-	double* map,
-	int x_size,
-	int y_size,
-	double* armstart_anglesV_rad,
-	double* armgoal_anglesV_rad,
-	int numofDOFs,
-	double*** plan,
-	int* planlength)
+TreeNode* nearestNeighbor(std::vector<TreeNode*>& tree, std::vector<double>& q_rand) {
+    TreeNode* nearest = nullptr;
+    double min_dist = INFINITY;
+    
+    for (TreeNode* node : tree) {
+        double dist = 0;
+        for (int i = 0; i < q_rand.size(); i++) {
+			double diff = node->angles[i] - q_rand[i];
+            dist += diff * diff;
+        }
+        if (dist < min_dist) {
+            min_dist = dist;
+            nearest = node;
+        }
+    }
+    return nearest;
+}
+
+std::vector<double> steer(std::vector<double>& q_from, std::vector<double>& q_to, double epsilon, int numofDOFs)
 {
-	const int NUM_SAMPLES = 10000;
-	const int K_NEAREST = 500;
+    std::vector<double> q_new(numofDOFs);
+    double dist = distance(q_from, q_to);
 
-	std::vector<Node*> roadmap;
-	auto isValid = [&](const std::vector<double>& config) {
-		return IsValidArmConfiguration(const_cast<double*>(config.data()), numofDOFs, map, x_size, y_size);
-	};
+    // If the points are effectively the same, return q_from
+    if (dist < 1e-3) {
+        return q_from;
+    }
 
-	hnswlib::L2Space space(numofDOFs);
-	hnswlib::HierarchicalNSW<float> hnsw(&space, NUM_SAMPLES + 2);
-	std::vector<std::vector<float>> hnsw_data_storage;
-	std::unordered_map<int, Node*> label_to_node;
+    double step_size = std::min(epsilon, dist);
+    double factor = step_size / dist;
 
-	int idx = 0;
-	for (int i = 0; i < NUM_SAMPLES; i++) {
-		std::vector<double> sample(numofDOFs);
-		for (int j = 0; j < numofDOFs; j++) {
-			sample[j] = ((double)rand() / RAND_MAX) * 2 * PI;
-		}
-		if (isValid(sample)) {
-			Node* node = new Node{sample};
-			roadmap.push_back(node);
-			hnsw_data_storage.emplace_back(sample.begin(), sample.end());
-			hnsw.addPoint(hnsw_data_storage.back().data(), idx);
-			label_to_node[idx] = node;
-			idx++;
-		}
-	}
-
-	Node* start_node = new Node{{armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs}};
-	Node* goal_node = new Node{{armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs}};
-
-	if (!isValid(start_node->angles) || !isValid(goal_node->angles)) {
-		printf("Start or Goal is in collision!\n");
-		*planlength = 0;
-		*plan = nullptr;
-		return;
-	}
-
-	hnsw_data_storage.emplace_back(start_node->angles.begin(), start_node->angles.end());
-	hnsw.addPoint(hnsw_data_storage.back().data(), idx);
-	label_to_node[idx] = start_node;
-	roadmap.push_back(start_node);
-	int start_idx = idx++;
-
-	hnsw_data_storage.emplace_back(goal_node->angles.begin(), goal_node->angles.end());
-	hnsw.addPoint(hnsw_data_storage.back().data(), idx);
-	label_to_node[idx] = goal_node;
-	roadmap.push_back(goal_node);
-	int goal_idx = idx++;
-
-	for (int i = 0; i < roadmap.size(); ++i) {
-		Node* node = roadmap[i];
-		std::priority_queue<std::pair<float, hnswlib::labeltype>> result = hnsw.searchKnn(node->angles.data(), K_NEAREST + 1);
-		while (!result.empty()) {
-			auto [dist, label] = result.top(); result.pop();
-			if (label_to_node.find(label) == label_to_node.end()) continue;
-			if (label_to_node[label] == node) continue;
-			Node* neighbor = label_to_node[label];
-			if (isValid(neighbor->angles)) {
-				node->neighbors.push_back(neighbor);
-			}
-		}
-	}
-
-	// debugSummary(roadmap, start_node, goal_node);
-
-	auto compare = [](const std::pair<double, Node*>& a, const std::pair<double, Node*>& b) {
-		return a.first > b.first;
-	};
-
-	std::priority_queue<std::pair<double, Node*>, std::vector<std::pair<double, Node*>>, decltype(compare)> pq(compare);
-	std::unordered_set<Node*> visited;
-	start_node->cost = 0.0;
-	pq.emplace(0.0, start_node);
-
-	// printf("[DEBUG] Starting Dijkstra from start_node...\n");
-
-	bool found = false;
-	while (!pq.empty()) {
-		Node* current = pq.top().second;
-		pq.pop();
-		if (visited.find(current) != visited.end()) continue;
-		visited.insert(current);
-
-		// printf("  Visiting node with cost %.3f, neighbors: %lu\n", current->cost, current->neighbors.size());
-		double dist_to_goal = computeDistance(current->angles, goal_node->angles);
-		// printf("    --> Distance to goal: %.6f\n", dist_to_goal);
-
-		if (current == goal_node) {
-			found = true;
-			break;
-		}
-		for (Node* neighbor : current->neighbors) {
-			double new_cost = current->cost + computeDistance(current->angles, neighbor->angles);
-			if (visited.find(neighbor) == visited.end() && (neighbor->parent == nullptr || new_cost < neighbor->cost)) {
-				neighbor->cost = new_cost;
-				neighbor->parent = current;
-				pq.emplace(new_cost, neighbor);
-			}
-		}
-	}
-
-	if (goal_node->parent == nullptr) {
-		printf("[DEBUG] Goal node was never reached in search.\n");
-	}
-
-	if (!found) {
-		printf("No valid path found!\n");
-		*planlength = 0;
-		*plan = nullptr;
-		return;
-	}
-
-	std::vector<std::vector<double>> path;
-	int MAX_ITER = 10000, iteration = 0;
-	for (Node* node = goal_node; node != nullptr; node = node->parent) {
-		if (iteration++ > MAX_ITER) {
-			printf("ERROR DETECTED: Infinite loop while backtracking!\n");
-			return;
-		}
-		path.push_back(node->angles);
-	}
-	reverse(path.begin(), path.end());
-	*planlength = path.size();
-	*plan = (double**) malloc(*planlength * sizeof(double*));
-	for (int i = 0; i < *planlength; i++) {
-		(*plan)[i] = (double*) malloc(numofDOFs * sizeof(double));
-		memcpy((*plan)[i], path[i].data(), numofDOFs * sizeof(double));
-	}
-
-	printf("PRM-HNSW found a path with %d waypoints.\n", *planlength);
-	for (Node* node : roadmap) delete node;
+    for (int i = 0; i < numofDOFs; i++) {
+        q_new[i] = q_from[i] + factor * (q_to[i] - q_from[i]);
+    }
+    return q_new;
 }
 
-// Standard RRT Planner (Unidirectional-Extending)
-static void RRTPlanner(
+std::vector<double> extend(std::vector<TreeNode*>& T,
+                      std::vector<double>& q_target,
+                      double* map,
+                      int x_size,
+                      int y_size,
+                      double epsilon,
+                      int numofDOFs)
+{
+    // 1) Find the nearest node in T to q_target
+    TreeNode* q_near = nearestNeighbor(T, q_target);
+    if (!q_near) {
+        DEBUG_PRINT("[extend] ERROR: No nearest node found! Tree size: " << T.size() << std::endl);
+        return {}; // Tree is empty or something went wrong
+    }
+
+    DEBUG_PRINT("[extend] q_near: ");
+    for (double v : q_near->angles) {
+        DEBUG_PRINT(v << " ");
+    }
+    DEBUG_PRINT(std::endl);
+
+    // 2) Compute q_new by stepping from q_near->angles toward q_target
+    std::vector<double> q_new = steer(q_near->angles, q_target, epsilon, numofDOFs);
+
+    DEBUG_PRINT("[extend] q_target: ");
+    for (double v : q_target) {
+        DEBUG_PRINT(v << " ");
+    }
+    DEBUG_PRINT(std::endl);
+
+    DEBUG_PRINT("[extend] q_new: ");
+    for (double v : q_new) {
+        DEBUG_PRINT(v << " ");
+    }
+    DEBUG_PRINT(std::endl);
+
+    // If steer returned the same as q_near->angles => no progress
+    if (equalDoubleArrays(q_new.data(), q_near->angles.data(), numofDOFs)) {
+        DEBUG_PRINT("[extend] WARNING: q_new equals q_near (no progress made)." << std::endl);
+        return {};  // "Trapped" => empty
+    }
+
+    // 3) Check if q_new is valid (collision-free)
+    if (!IsValidArmConfiguration(q_new.data(), numofDOFs, map, x_size, y_size)) {
+        DEBUG_PRINT("[extend] WARNING: q_new is invalid (collision detected)." << std::endl);
+        return {};  // "Trapped" => empty
+    }
+
+    // 4) Add q_new as a new TreeNode in T
+    TreeNode* new_node = new TreeNode(q_new, q_near);
+    T.push_back(new_node);
+
+    // 5) Return the newly created configuration
+    return q_new;
+}
+
+bool connect(std::vector<TreeNode*>& T,
+             std::vector<double>& q_target,
+             double* map,
+             int x_size,
+             int y_size,
+             double epsilon,
+             int numofDOFs)
+{
+    while (true) {
+        // Attempt to extend the tree toward q_target
+        std::vector<double> q_new = extend(T, q_target, map, x_size, y_size, epsilon, numofDOFs);
+
+        // If extend(...) returned an empty std::vector, we're trapped (no progress).
+        if (q_new.empty()) {
+            return false; // TRAPPED
+        }
+
+        // If q_new == q_target, we've reached the target exactly.
+        if (equalDoubleArrays(q_new.data(), q_target.data(), numofDOFs)) {
+            return true; // REACHED
+        }
+
+        // Otherwise, we ADVANCED but haven't reached q_target yet.
+        // We keep looping to extend further from the newly added node.
+    }
+}
+
+void getRRTConnectPath(std::vector<TreeNode*>& T_a, std::vector<TreeNode*>& T_b, double*** plan, int* planlength) {
+    // Extract path from T_a (from start to connection)
+    std::vector<std::vector<double>> path_a;
+    TreeNode* node = T_a.back();
+    DEBUG_PRINT("[getRRTConnectPath] T_a connection node: ");
+    for (double v : node->angles) {
+        DEBUG_PRINT(v << " ");
+    }
+    DEBUG_PRINT(std::endl);
+    while (node) {
+        path_a.push_back(node->angles);
+        node = node->parent;
+    }
+    reverse(path_a.begin(), path_a.end()); // From start -> connection
+
+    // Extract path from T_b (from connection to goal)
+    std::vector<std::vector<double>> path_b;
+    node = T_b.back();
+    DEBUG_PRINT("[getRRTConnectPath] T_b connection node: ");
+    for (double v : node->angles) {
+        DEBUG_PRINT(v << " ");
+    }
+    DEBUG_PRINT(std::endl);
+    while (node) {
+        path_b.push_back(node->angles);
+        node = node->parent;
+    }
+
+    // Check if the connection nodes match.
+    // If they do, the first element of path_b should equal the last element of path_a.
+    if (!path_a.empty() && !path_b.empty() &&
+        equalDoubleArrays(path_a.back().data(), path_b.front().data(), path_a.back().size())) {
+        DEBUG_PRINT("[getRRTConnectPath] Duplicate connection node detected, removing duplicate." << std::endl);
+        path_b.erase(path_b.begin());
+    } else {
+        DEBUG_PRINT("[getRRTConnectPath] Warning: Connection nodes do not match!" << std::endl);
+    }
+
+    // Concatenate the two paths.
+    std::vector<std::vector<double>> full_path = path_a;
+    full_path.insert(full_path.end(), path_b.begin(), path_b.end());
+
+    // Print the full path for debugging.
+    DEBUG_PRINT("[getRRTConnectPath] Full path:" << std::endl);
+    for (size_t i = 0; i < full_path.size(); i++) {
+        DEBUG_PRINT("  Node " << i << ": ");
+        for (double val : full_path[i]) {
+            DEBUG_PRINT(val << " ");
+        }
+        DEBUG_PRINT(std::endl);
+    }
+
+    // Allocate memory for the plan output.
+    *planlength = full_path.size();
+    *plan = new double*[*planlength];
+    for (size_t i = 0; i < full_path.size(); i++) {
+        (*plan)[i] = new double[full_path[i].size()];
+        copy(full_path[i].begin(), full_path[i].end(), (*plan)[i]);
+    }
+}
+
+
+struct PRMNode {
+    std::vector<double> angles;
+    std::vector<int> neighbors;
+};
+
+static void PRM_planner(
     double* map,
     int x_size,
     int y_size,
@@ -647,119 +553,248 @@ static void RRTPlanner(
     double*** plan,
     int* planlength)
 {
-    const int MAX_ITER = 7000;       // maximum iterations
-    const double INITIAL_STEP_SIZE = 0.05; // dynamic step size
-    const double MIN_STEP_SIZE = 0.005; // smaller step size near obstacles
-    const double GOAL_BIAS_INITIAL = 0.05;   // probability of sampling goal directly (5%)
-    const double GOAL_THRESHOLD = 0.02; // threshold connection to goal
+    *plan = NULL;
+    *planlength = 0;
+    
+    int numSamples = 20000;         // Number of random samples to add.
+    int k = 500;                   // Number of nearest neighbors to connect.
+    
+    // Build the roadmap.
+    // First, add the start and goal nodes.
+    vector<PRMNode> roadmap;
+    {
+        PRMNode startNode;
+        startNode.angles = vector<double>(armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs);
+        roadmap.push_back(startNode);
+        DEBUG_PRINT("[PRM] Start node added." << endl);
 
-    struct Node {
-        vector<double> angles;
-        Node* parent;
-        Node(vector<double> ang, Node* p = nullptr) : angles(ang), parent(p) {}
-    };
+        PRMNode goalNode;
+        goalNode.angles = vector<double>(armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs);
+        roadmap.push_back(goalNode);
+        DEBUG_PRINT("[PRM] Goal node added." << endl);
+    }
+    
+    // Sample random, collision-free configurations.
+    for (int i = 0; i < numSamples; i++) {
+        vector<double> q = randomConfig(numofDOFs, map, x_size, y_size);
+        PRMNode node;
+        node.angles = q;
+        roadmap.push_back(node);
+    }
+    DEBUG_PRINT("[PRM] Roadmap sampled: " << roadmap.size() << " nodes." << endl);
 
-    vector<Node*> tree;
-    double goal_bias = GOAL_BIAS_INITIAL;
-
-    auto isValid = [&](const vector<double>& config) {
-        return IsValidArmConfiguration(const_cast<double*>(config.data()), numofDOFs, map, x_size, y_size);
-    };
-
-    // find the nearest neighbor node in the tree to a given target configuration
-    auto nearestNeighbor = [](const vector<Node*>& tree, const vector<double>& target) {
-        Node* best = nullptr;
-        double min_dist = DBL_MAX;
-        for (Node* node : tree) {
-            double dist = computeDistance(node->angles, target);
-            if (dist < min_dist) {
-                min_dist = dist;
-                best = node;
+    // Build roadmap edges using k nearest neighbors.
+    int N = roadmap.size();
+    for (int i = 0; i < N; i++) {
+        // Build a list of (distance, index) pairs for node i.
+        vector<std::pair<double, int>> dists;
+        for (int j = 0; j < N; j++) {
+            if (j == i) continue;
+            double d = distance(roadmap[i].angles, roadmap[j].angles);
+            if (d > 1e-3) {
+                dists.push_back(std::make_pair(d, j));
             }
         }
-        return best;
-    };
-
-    auto extend = [&](Node* nearest, const std::vector<double>& target, double step_size) {
-        std::vector<double> new_ang = nearest->angles;
-        double dist = computeDistance(nearest->angles, target);
-        double alpha = std::min(step_size / dist, 1.0);
-        for (int i = 0; i < numofDOFs; i++) {
-            new_ang[i] = nearest->angles[i] + alpha * (target[i] - nearest->angles[i]);
+        // Sort the pairs by distance.
+        std::sort(dists.begin(), dists.end(), [](auto &a, auto &b) { return a.first < b.first; });
+        int num_neighbors = std::min(k, (int)dists.size());
+        for (int n = 0; n < num_neighbors; n++) {
+            int neighbor_index = dists[n].second;
+            roadmap[i].neighbors.push_back(neighbor_index);
+            // Add reverse edge if not already present.
+            roadmap[neighbor_index].neighbors.push_back(i);
+            DEBUG_PRINT("[PRM] Edge added between nodes " << i << " and " << neighbor_index 
+                        << " (d = " << dists[n].first << ")." << endl);
         }
-        if (isValid(new_ang)) {
-            return new Node(new_ang, nearest);
+    }
+    DEBUG_PRINT("[PRM] Roadmap edges built." << endl);
+
+    // Compute the shortest path from start (index 0) to goal (index 1) using Dijkstra
+    std::vector<double> cost(N, std::numeric_limits<double>::infinity());
+    std::vector<int> prev(N, -1);
+    typedef std::pair<double, int> P;
+    std::priority_queue<P, vector<P>, std::greater<P>> pq;
+    cost[0] = 0.0;
+    pq.push(P(0.0, 0));
+    DEBUG_PRINT("[PRM] Dijkstra: Starting from node 0." << endl);
+
+    while (!pq.empty()) {
+        auto cur_entry = pq.top();
+        pq.pop();
+        double cur_cost = cur_entry.first;
+        int cur = cur_entry.second;
+        DEBUG_PRINT("[PRM] Dijkstra: Processing node " << cur << " with cost " << cur_cost << "." << endl);
+        if (cur_cost > cost[cur]) continue; // Outdated entry.
+        if (cur == 1) {
+            DEBUG_PRINT("[PRM] Dijkstra: Goal node reached with cost " << cur_cost << "." << endl);
+            break; // Goal reached.
         }
-        return static_cast<Node*>(nullptr);
-    };
+        for (int neighbor : roadmap[cur].neighbors) {
+            double weight = distance(roadmap[cur].angles, roadmap[neighbor].angles);
+            if (cost[cur] + weight < cost[neighbor]) {
+                cost[neighbor] = cost[cur] + weight;
+                prev[neighbor] = cur;
+                pq.push(P(cost[neighbor], neighbor));
+                DEBUG_PRINT("[PRM] Dijkstra: Updating node " << neighbor 
+                            << " with new cost " << cost[neighbor] 
+                            << " via node " << cur << "." << endl);
+            }
+        }
+    }
 
-    tree.push_back(new Node({armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs}));
-    vector<double> goal_config(armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs);
+    if (cost[1] == std::numeric_limits<double>::infinity()) {
+        DEBUG_PRINT("[PRM] Failed to connect start and goal." << endl);
+        return;
+    }
+    
+    // Reconstruct the path from goal (index 1) back to start (index 0).
+    std::vector<int> pathIndices;
+    for (int cur = 1; cur != -1; cur = prev[cur]) {
+        pathIndices.push_back(cur);
+    }
+    reverse(pathIndices.begin(), pathIndices.end());
+    
+    DEBUG_PRINT("[PRM] Path found with " << pathIndices.size() << " nodes." << endl);
+    for (size_t i = 0; i < pathIndices.size(); i++) {
+        DEBUG_PRINT("  Node " << i << ": ");
+        for (double v : roadmap[pathIndices[i]].angles)
+            DEBUG_PRINT(v << " ");
+        DEBUG_PRINT(std::endl);
+    }
+    
+    // Build the output plan from the roadmap.
+    vector<vector<double>> full_path;
+    for (int idx : pathIndices) {
+        full_path.push_back(roadmap[idx].angles);
+    }
+    
+    // Allocate the plan output.
+    *planlength = full_path.size();
+    *plan = new double*[*planlength];
+    for (size_t i = 0; i < full_path.size(); i++) {
+        (*plan)[i] = new double[full_path[i].size()];
+        std::copy(full_path[i].begin(), full_path[i].end(), (*plan)[i]);
+    }
+}
 
-    if (!isValid(tree.back()->angles) || !isValid(goal_config)) {
-        printf("Start or Goal is in collision!\n");
+static void RRT_planner(
+    double* map,
+    int x_size,
+    int y_size,
+    double* armstart_anglesV_rad,
+    double* armgoal_anglesV_rad,
+    int numofDOFs,
+    double*** plan,
+    int* planlength)
+{
+    *plan = NULL;
+    *planlength = 0;
+
+    int K = 5000;
+    double epsilon = 1;
+
+    if (numofDOFs > 5) {
+        K = 50000;      // More iterations for a larger space.
+        epsilon = 2;  
+    }
+
+    // Initialize the tree with the start configuration.
+    std::vector<TreeNode*> T;
+    T.push_back(new TreeNode(vector<double>(armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs)));
+
+    DEBUG_PRINT("RRT Planner Started" << std::endl);
+    DEBUG_PRINT("Start Configuration: ");
+    for (double angle : T.front()->angles)
+        DEBUG_PRINT(angle << " ");
+    DEBUG_PRINT(std::endl);
+
+    std::vector<double> goalConfig(armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs);
+    DEBUG_PRINT("Goal Configuration: ");
+    for (double angle : goalConfig)
+        DEBUG_PRINT(angle << " ");
+    DEBUG_PRINT(std::endl);
+
+    TreeNode* goal_node = nullptr;
+    for (int i = 0; i < K; i++) {
+        DEBUG_PRINT("Iteration " << i + 1 << std::endl);
+        
+        vector<double> q_rand = randomConfig(numofDOFs, map, x_size, y_size);
+
+        DEBUG_PRINT("  q_rand: ");
+        for (double val : q_rand)
+            DEBUG_PRINT(val << " ");
+        DEBUG_PRINT(std::endl);
+
+        vector<double> q_new = extend(T, q_rand, map, x_size, y_size, epsilon, numofDOFs);
+        if (!q_new.empty()) {
+            DEBUG_PRINT("  q_new added to tree: ");
+            for (double val : q_new)
+                DEBUG_PRINT(val << " ");
+            DEBUG_PRINT(std::endl);
+
+            // Check if the new configuration matches the goal (within tolerance).
+            if (distance(q_new, goalConfig) <= epsilon) {
+                T.push_back(new TreeNode(goalConfig, T.back()));
+                DEBUG_PRINT("  Goal reached!" << std::endl);
+                goal_node = T.back();
+                break;
+            }
+        } else {
+            DEBUG_PRINT("  q_new is empty (extension failed)" << std::endl);
+        }
+    }
+
+    if (goal_node == nullptr) {
+        DEBUG_PRINT("Failed to find a path within " << K << " iterations." << std::endl);
         return;
     }
 
-    // main RRT extending
-    for (int iter = 0; iter < MAX_ITER; iter++) {
-        // goal bias
-        vector<double> random_config(numofDOFs);
-        if ((double)rand() / RAND_MAX < goal_bias) {
-            random_config = goal_config;
-        } else {
-            for (int j = 0; j < numofDOFs; j++) {
-                random_config[j] = ((double)rand() / RAND_MAX) * 2 * M_PI;
-            }
-        }
-
-        Node* nearest = nearestNeighbor(tree, random_config);
-        double step_size = std::max(MIN_STEP_SIZE, INITIAL_STEP_SIZE * (1.0 - (double)iter / MAX_ITER));
-        Node* new_node = extend(nearest, random_config, step_size);
-        if (!new_node) continue; // trapped
-        tree.push_back(new_node);
-
-        // check the distance to the goal
-        double dist_to_goal = computeDistance(new_node->angles, goal_config);
-        if (dist_to_goal < GOAL_THRESHOLD) {
-            Node* final_node = extend(new_node, goal_config, MIN_STEP_SIZE);
-            if (final_node) {
-                tree.push_back(final_node);
-                break;
-            }
-        }
-
-        goal_bias = std::min(0.3, goal_bias + 0.0005); // dynamically increase goal bias over iterations
-    }
-
-    // backtrack the path
-    vector<vector<double>> path;
-    Node* node = tree.back();
+    // Extract the path from the goal node back to the start.
+    std::vector<std::vector<double>> path;
+    TreeNode* node = goal_node;
     while (node) {
         path.push_back(node->angles);
         node = node->parent;
     }
     reverse(path.begin(), path.end());
-
-    // ensure the path starts at start position and ends at goal position
-    memcpy(path.front().data(), armstart_anglesV_rad, numofDOFs * sizeof(double));
-    memcpy(path.back().data(), armgoal_anglesV_rad, numofDOFs * sizeof(double));
-
-    *planlength = path.size();
-    *plan = (double**) malloc(*planlength * sizeof(double*));
-    for (int i = 0; i < *planlength; i++) {
-        (*plan)[i] = (double*) malloc(numofDOFs * sizeof(double));
-        memcpy((*plan)[i], path[i].data(), numofDOFs * sizeof(double));
+    DEBUG_PRINT("Path found with length: " << path.size() << std::endl);
+    for (size_t i = 0; i < path.size(); i++) {
+        DEBUG_PRINT("  Node " << i << ": ");
+        for (double val : path[i])
+            DEBUG_PRINT(val << " ");
+        DEBUG_PRINT(std::endl);
     }
 
-    for (Node* node : tree) delete node;
+    // Allocate the plan output.
+    *planlength = path.size();
+    *plan = new double*[*planlength];
+    for (size_t i = 0; i < path.size(); i++) {
+        (*plan)[i] = new double[path[i].size()];
+        std::copy(path[i].begin(), path[i].end(), (*plan)[i]);
+    }
+}
 
-    printf("RRT successfully found a path with %d waypoints.\n", *planlength);
+std::vector<TreeNode*> getNeighborsWithinRadius(
+    std::vector<TreeNode*>& tree,
+    std::vector<double>& q_new,
+    double neighborRadius,
+    int numofDOFs)
+{
+    std::vector<TreeNode*> neighbors;
+    for (TreeNode* node : tree) {
+        double d = distance(node->angles, q_new);
+        if (d < neighborRadius) {
+            neighbors.push_back(node);
+        }
+    }
+    return neighbors;
 }
 
 
-// RRT-HNSW Planner
-static void RRTHNSWPlanner(
+#include "hnswlib/hnswlib/hnswlib.h" 
+
+// PRM_planner with HNSW
+static void PRM_HNSW_planner(
     double* map,
     int x_size,
     int y_size,
@@ -769,349 +804,102 @@ static void RRTHNSWPlanner(
     double*** plan,
     int* planlength)
 {
-    const int MAX_ITER = 20000;
-    const double INITIAL_STEP_SIZE = 0.05;
-    const double MIN_STEP_SIZE = 0.005;
-    const double GOAL_BIAS_INITIAL = 0.1;
-    const double GOAL_THRESHOLD = 0.02;
+    *plan = NULL;
+    *planlength = 0;
 
-    struct Node {
-        std::vector<double> angles;
-        Node* parent;
-        Node(std::vector<double> ang, Node* p = nullptr) : angles(ang), parent(p) {}
-    };
+    int numSamples = 20000;
+    int k = 500;
+    int dim = numofDOFs;
 
-    std::vector<Node*> tree;
-    hnswlib::L2Space space(numofDOFs);
-    hnswlib::HierarchicalNSW<float> hnsw(&space, MAX_ITER + 2);
-    std::vector<std::vector<float>> hnsw_data;
-    std::unordered_map<int, Node*> label_to_node;
+    using namespace hnswlib;
 
-    double goal_bias = GOAL_BIAS_INITIAL;
-    auto isValid = [&](const std::vector<double>& config) {
-        return IsValidArmConfiguration(const_cast<double*>(config.data()), numofDOFs, map, x_size, y_size);
-    };
+    // Create L2 space and index
+    L2Space l2space(dim);
+    HierarchicalNSW<float> hnsw_index(&l2space, numSamples + 2); // +2 for start & goal
 
-    auto extend = [&](Node* nearest, const std::vector<double>& target, double step_size) {
-        std::vector<double> new_ang = nearest->angles;
-        double dist = computeDistance(nearest->angles, target);
-        double alpha = std::min(step_size / dist, 1.0);
-        for (int i = 0; i < numofDOFs; i++) {
-            new_ang[i] = nearest->angles[i] + alpha * (target[i] - nearest->angles[i]);
-        }
-        if (isValid(new_ang)) return new Node(new_ang, nearest);
-        return static_cast<Node*>(nullptr);
-    };
+    std::vector<PRMNode> roadmap;
+    std::vector<std::vector<float>> node_data; // Keep data for HNSW
 
-    Node* start_node = new Node({armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs});
-    std::vector<double> goal_config(armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs);
-    if (!isValid(start_node->angles) || !isValid(goal_config)) {
-        printf("Start or Goal is in collision!\n");
-        return;
+    // Add start node
+    PRMNode startNode;
+    startNode.angles = std::vector<double>(armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs);
+    roadmap.push_back(startNode);
+    node_data.push_back(std::vector<float>(startNode.angles.begin(), startNode.angles.end()));
+    hnsw_index.addPoint(node_data.back().data(), 0);
+
+    // Add goal node
+    PRMNode goalNode;
+    goalNode.angles = std::vector<double>(armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs);
+    roadmap.push_back(goalNode);
+    node_data.push_back(std::vector<float>(goalNode.angles.begin(), goalNode.angles.end()));
+    hnsw_index.addPoint(node_data.back().data(), 1);
+
+    // Sample valid configurations
+    for (int i = 0; i < numSamples; i++) {
+        std::vector<double> q = randomConfig(numofDOFs, map, x_size, y_size);
+        PRMNode node;
+        node.angles = q;
+        roadmap.push_back(node);
+        node_data.push_back(std::vector<float>(q.begin(), q.end()));
+        hnsw_index.addPoint(node_data.back().data(), i + 2);
     }
 
-    tree.push_back(start_node);
-    hnsw_data.emplace_back(start_node->angles.begin(), start_node->angles.end());
-    hnsw.addPoint(hnsw_data.back().data(), 0);
-    label_to_node[0] = start_node;
-    int hnsw_id = 1;
+    // Connect using HNSW k-NN
+    for (int i = 0; i < roadmap.size(); ++i) {
+		auto result = hnsw_index.searchKnn(node_data[i].data(), k + 1);
 
-    Node* final_node = nullptr;
-    for (int iter = 0; iter < MAX_ITER; iter++) {
-        std::vector<double> random_config(numofDOFs);
-        if ((double)rand() / RAND_MAX < goal_bias) {
-            random_config = goal_config;
-        } else {
-            for (int j = 0; j < numofDOFs; j++) {
-                random_config[j] = ((double)rand() / RAND_MAX) * 2 * M_PI;
+        while (!result.empty()) {
+            auto [dist, j] = result.top();
+            result.pop();
+            if (i == j) continue; // skip self
+            if (IsValidArmConfiguration(roadmap[i].angles.data(), numofDOFs, map, x_size, y_size) &&
+                IsValidArmConfiguration(roadmap[j].angles.data(), numofDOFs, map, x_size, y_size) &&
+                IsValidLineSegment(roadmap[i].angles[0], roadmap[i].angles[1],
+                                   roadmap[j].angles[0], roadmap[j].angles[1],
+                                   map, x_size, y_size))
+            {
+                roadmap[i].neighbors.push_back(j);
+                roadmap[j].neighbors.push_back(i);
             }
         }
-
-        auto result = hnsw.searchKnn(random_config.data(), 1);
-        Node* nearest = label_to_node[result.top().second];
-
-        double step_size = std::max(MIN_STEP_SIZE, INITIAL_STEP_SIZE * (1.0 - (double)iter / MAX_ITER));
-        Node* new_node = extend(nearest, random_config, step_size);
-        if (!new_node) continue;
-
-        tree.push_back(new_node);
-        hnsw_data.emplace_back(new_node->angles.begin(), new_node->angles.end());
-        hnsw.addPoint(hnsw_data.back().data(), hnsw_id);
-        label_to_node[hnsw_id] = new_node;
-        hnsw_id++;
-
-        double dist_to_goal = computeDistance(new_node->angles, goal_config);
-        if (dist_to_goal < GOAL_THRESHOLD) {
-            Node* connect_goal = extend(new_node, goal_config, MIN_STEP_SIZE);
-            if (connect_goal) {
-                final_node = connect_goal;
-                final_node->parent = new_node;
-                tree.push_back(final_node);
-                break;
-            }
-        }
-
-        goal_bias = std::min(0.3, goal_bias + 0.0005);
     }
 
-    if (!final_node) {
-        printf("RRT-HNSW failed to find a path.\n");
-        *planlength = 0;
-        *plan = nullptr;
-        return;
-    }
+    // Dijkstra from start(0) to goal(1)
+    int N = roadmap.size();
+    std::vector<double> cost(N, std::numeric_limits<double>::infinity());
+    std::vector<int> prev(N, -1);
+    std::priority_queue<std::pair<double, int>, std::vector<std::pair<double, int>>, std::greater<>> pq;
+    cost[0] = 0.0;
+    pq.emplace(0.0, 0);
 
-    std::vector<std::vector<double>> path;
-    for (Node* node = final_node; node != nullptr; node = node->parent) {
-        path.push_back(node->angles);
-    }
-    std::reverse(path.begin(), path.end());
-
-    memcpy(path.front().data(), armstart_anglesV_rad, numofDOFs * sizeof(double));
-    memcpy(path.back().data(), armgoal_anglesV_rad, numofDOFs * sizeof(double));
-
-    *planlength = path.size();
-    *plan = (double**) malloc(*planlength * sizeof(double*));
-    for (int i = 0; i < *planlength; i++) {
-        (*plan)[i] = (double*) malloc(numofDOFs * sizeof(double));
-        memcpy((*plan)[i], path[i].data(), numofDOFs * sizeof(double));
-    }
-
-    for (Node* node : tree) delete node;
-    printf("RRT-HNSW successfully found a path with %d waypoints.\n", *planlength);
-}
-
-struct NodeCloud {
-    vector<Node*> nodes;
-
-    // Required for nanoflann
-    inline size_t kdtree_get_point_count() const { return nodes.size(); }
-    inline double kdtree_get_pt(const size_t idx, const size_t dim) const {
-        return nodes[idx]->angles[dim];
-    }
-    template <class BBOX>
-    bool kdtree_get_bbox(BBOX&) const { return false; }
-};
-
-typedef KDTreeSingleIndexAdaptor<
-    L2_Simple_Adaptor<double, NodeCloud>,
-    NodeCloud,
-    -1, // Dynamic dimensions
-    size_t
-> KDTree;
-
-// PRM-KDTree Planner
-static void PRMKDTreePlanner(
-    double* map, int x_size, int y_size,
-    double* armstart_anglesV_rad, double* armgoal_anglesV_rad, int numofDOFs,
-    double*** plan, int* planlength)
-{
-    const int NUM_SAMPLES = 10000;
-    const int K_NEAREST = 13;
-
-    vector<Node*> roadmap;
-    NodeCloud cloud;
-
-    auto isValid = [&](const vector<double>& config) {
-        return IsValidArmConfiguration(const_cast<double*>(config.data()), numofDOFs, map, x_size, y_size);
-    };
-
-    // Generate valid samples
-    for (int i = 0; i < NUM_SAMPLES; i++) {
-        vector<double> sample(numofDOFs);
-        for (int j = 0; j < numofDOFs; j++)
-            sample[j] = ((double)rand() / RAND_MAX) * 2 * PI;
-
-        if (isValid(sample)) {
-            Node* new_node = new Node{sample};
-            roadmap.push_back(new_node);
-            cloud.nodes.push_back(new_node);
-        }
-    }
-
-    Node* start_node = new Node{{armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs}};
-    Node* goal_node = new Node{{armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs}};
-    roadmap.push_back(start_node);
-    roadmap.push_back(goal_node);
-    cloud.nodes.push_back(start_node);
-    cloud.nodes.push_back(goal_node);
-
-    if (!isValid(start_node->angles) || !isValid(goal_node->angles)) {
-        printf("Start or Goal is in collision!\n");
-        return;
-    }
-
-    // Build KDTree
-    KDTree index(numofDOFs, cloud, KDTreeSingleIndexAdaptorParams(10));
-    index.buildIndex();
-
-    // Connect neighbors using KDTree
-    for (Node* node : roadmap) {
-        vector<size_t> ret_indices(K_NEAREST + 1);
-        vector<double> out_distances_sqr(K_NEAREST + 1);
-
-        KNNResultSet<double> resultSet(K_NEAREST + 1);
-        resultSet.init(&ret_indices[0], &out_distances_sqr[0]);
-        index.findNeighbors(resultSet, node->angles.data(), nanoflann::SearchParameters(10));
-
-        for (size_t i = 1; i < resultSet.size(); i++) { // Skip first as it's self
-            Node* neighbor = cloud.nodes[ret_indices[i]];
-            if (isValid(neighbor->angles))
-                node->neighbors.push_back(neighbor);
-        }
-    }
-
-    // Use existing Dijkstra algorithm for searching
-    auto compare = [](const pair<double, Node*>& a, const pair<double, Node*>& b) {
-        return a.first > b.first;
-    };
-
-    priority_queue<pair<double, Node*>, vector<pair<double, Node*>>, decltype(compare)> pq(compare);
-    unordered_set<Node*> visited;
-
-    start_node->cost = 0.0;
-    pq.emplace(0.0, start_node);
-
-    bool found = false;
     while (!pq.empty()) {
-        Node* current = pq.top().second;
-        pq.pop();
-
-        if (visited.count(current)) continue;
-        visited.insert(current);
-
-        if (current == goal_node) {
-            found = true;
-            break;
-        }
-
-        for (Node* neighbor : current->neighbors) {
-            double new_cost = current->cost + computeDistance(current->angles, neighbor->angles);
-            if (!visited.count(neighbor) && (neighbor->parent == nullptr || new_cost < neighbor->cost)) {
-                neighbor->cost = new_cost;
-                neighbor->parent = current;
-                pq.emplace(new_cost, neighbor);
+        auto [c, u] = pq.top(); pq.pop();
+        if (c > cost[u]) continue;
+        if (u == 1) break;
+        for (int v : roadmap[u].neighbors) {
+            double weight = distance(roadmap[u].angles, roadmap[v].angles);
+            if (cost[u] + weight < cost[v]) {
+                cost[v] = cost[u] + weight;
+                prev[v] = u;
+                pq.emplace(cost[v], v);
             }
         }
     }
 
-    if (!found) {
-        printf("No valid path found!\n");
-        return;
+    if (cost[1] == std::numeric_limits<double>::infinity()) return;
+
+    std::vector<int> pathIndices;
+    for (int cur = 1; cur != -1; cur = prev[cur]) pathIndices.push_back(cur);
+    std::reverse(pathIndices.begin(), pathIndices.end());
+
+    *planlength = pathIndices.size();
+    *plan = new double*[*planlength];
+    for (int i = 0; i < *planlength; ++i) {
+        (*plan)[i] = new double[numofDOFs];
+        std::copy(roadmap[pathIndices[i]].angles.begin(), roadmap[pathIndices[i]].angles.end(), (*plan)[i]);
     }
-
-    vector<vector<double>> path;
-    for (Node* node = goal_node; node != nullptr; node = node->parent)
-        path.push_back(node->angles);
-
-    reverse(path.begin(), path.end());
-    *planlength = path.size();
-    *plan = (double**)malloc(*planlength * sizeof(double*));
-
-    for (int i = 0; i < *planlength; i++) {
-        (*plan)[i] = (double*)malloc(numofDOFs * sizeof(double));
-        memcpy((*plan)[i], path[i].data(), numofDOFs * sizeof(double));
-    }
-
-    printf("PRM-KDTree successfully found a path with %d waypoints.\n", *planlength);
-    for (Node* node : roadmap) delete node;
 }
 
-// RRT-KDTree Planner
-static void RRTKDTreePlanner(
-    double* map, int x_size, int y_size,
-    double* armstart_anglesV_rad, double* armgoal_anglesV_rad, int numofDOFs,
-    double*** plan, int* planlength)
-{
-    const int MAX_ITER = 10000;
-    const double STEP_SIZE = 0.05;
-    const double GOAL_BIAS = 0.1;
-    const double GOAL_THRESHOLD = 0.02;
-
-    vector<Node*> tree;
-    NodeCloud cloud;
-
-    auto isValid = [&](const vector<double>& config) {
-        return IsValidArmConfiguration(const_cast<double*>(config.data()), numofDOFs, map, x_size, y_size);
-    };
-
-    Node* start_node = new Node{{armstart_anglesV_rad, armstart_anglesV_rad + numofDOFs}};
-    vector<double> goal_config(armgoal_anglesV_rad, armgoal_anglesV_rad + numofDOFs);
-
-    if (!isValid(start_node->angles) || !isValid(goal_config)) {
-        printf("Start or Goal is in collision!\n");
-        return;
-    }
-
-    tree.push_back(start_node);
-    cloud.nodes.push_back(start_node);
-
-    KDTree index(numofDOFs, cloud, KDTreeSingleIndexAdaptorParams(10));
-    index.buildIndex();
-
-    Node* final_node = nullptr;
-
-    for (int iter = 0; iter < MAX_ITER; iter++) {
-        vector<double> sample(numofDOFs);
-        if ((double)rand() / RAND_MAX < GOAL_BIAS) {
-            sample = goal_config;
-        } else {
-            for (int j = 0; j < numofDOFs; j++)
-                sample[j] = ((double)rand() / RAND_MAX) * 2 * PI;
-        }
-
-        size_t nearest_idx;
-        double dist_sq;
-        KNNResultSet<double> resultSet(1);
-        resultSet.init(&nearest_idx, &dist_sq);
-        index.findNeighbors(resultSet, sample.data(), nanoflann::SearchParameters(10));
-        Node* nearest = cloud.nodes[nearest_idx];
-
-        vector<double> direction(numofDOFs);
-        double dist = sqrt(dist_sq);
-        for (int j = 0; j < numofDOFs; j++)
-            direction[j] = nearest->angles[j] + STEP_SIZE * (sample[j] - nearest->angles[j]) / dist;
-
-        if (!isValid(direction)) continue;
-
-		Node* new_node = new Node{direction};
-		new_node->parent = nearest;
-
-        tree.push_back(new_node);
-        cloud.nodes.push_back(new_node);
-		
-		if (cloud.nodes.size() % 500 == 0) {
-			index.buildIndex();
-		}
-        if (computeDistance(new_node->angles, goal_config) < GOAL_THRESHOLD) {
-			final_node = new Node{goal_config};
-			final_node->parent = new_node;
-            tree.push_back(final_node);
-            break;
-        }
-    }
-
-    if (!final_node) {
-        printf("RRT-KDTree failed to find a path.\n");
-        return;
-    }
-
-    vector<vector<double>> path;
-    for (Node* node = final_node; node != nullptr; node = node->parent)
-        path.push_back(node->angles);
-
-    reverse(path.begin(), path.end());
-    *planlength = path.size();
-    *plan = (double**)malloc(*planlength * sizeof(double*));
-
-    for (int i = 0; i < *planlength; i++) {
-        (*plan)[i] = (double*)malloc(numofDOFs * sizeof(double));
-        memcpy((*plan)[i], path[i].data(), numofDOFs * sizeof(double));
-    }
-
-    printf("RRT-KDTree successfully found a path with %d waypoints.\n", *planlength);
-    for (Node* node : tree) delete node;
-}
 
 /** Your final solution will be graded by an grading script which will
  * send the default 6 arguments:
@@ -1145,20 +933,11 @@ int main(int argc, char** argv) {
 
 	double** plan = NULL;
 	int planlength = 0;
-    
-	if (whichPlanner == PRM) {
-		PRMPlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
-	} else if (whichPlanner == RRT) {
-		RRTPlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
-	} else if (whichPlanner == PRM_HNSW) {
-		PRMHNSWPlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
-	} else if (whichPlanner == RRT_HNSW) {
-		RRTHNSWPlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
-	} else if (whichPlanner == PRM_KDTree) {
-		PRMKDTreePlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
-	} else if (whichPlanner == RRT_KDTree) {
-		RRTKDTreePlanner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
-	}
+
+	if (whichPlanner == RRT) RRT_planner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
+	else if (whichPlanner == PRM) PRM_planner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
+	else if (whichPlanner == PRM_HNSW) PRM_HNSW_planner(map, x_size, y_size, startPos, goalPos, numOfDOFs, &plan, &planlength);
+	else throw std::runtime_error("Invalid planner number!\n");
 
 	//// Feel free to modify anything above.
 	//// If you modify something below, please change it back afterwards as the 
